@@ -1,0 +1,9 @@
+streamlit
+plotly
+pandas
+numpy
+statsmodels
+holidays
+openpyxl
+playwright
+playwright-stealth
