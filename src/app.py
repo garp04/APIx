@@ -10,6 +10,16 @@ st.set_page_config(
     layout="wide"
 )
 
+# Automatically install Playwright browser binaries on Streamlit Cloud startup
+@st.cache_resource
+def install_playwright():
+    try:
+        subprocess.run(["playwright", "install", "chromium"], check=True)
+    except Exception as e:
+        print(f"Playwright installation note: {e}")
+
+install_playwright()
+
 # Custom CSS for layout spacing and card styling
 st.markdown("""
     <style>
@@ -108,7 +118,7 @@ kpi4.metric("Active Filter Scope", selected_sector, "Monitored Route")
 st.markdown("---")
 
 # -------------------------------------------------------------
-# SECTION 2: High-Frequency Index vs Monthly Benchmark (Dynamic Route Support)
+# SECTION 2: High-Frequency Index vs Monthly Benchmark
 # -------------------------------------------------------------
 st.markdown("<a id='real-time-vs-monthly-inflation'></a>", unsafe_allow_html=True)
 
@@ -117,7 +127,6 @@ if selected_sector == "All Corridors (National Composite)":
     st.markdown("## 2. Real-Time Daily Tracking vs. Official Monthly Survey")
     st.markdown("> *What this shows:* Traditional government reports only release numbers once a month. The blue line tracks prices every single day, exposing sudden holiday spikes and weekend surges that monthly surveys miss.")
 else:
-    # Robust case-insensitive and whitespace-safe column matching
     matched_col = None
     for col in df_daily.columns:
         if col.strip().upper() == selected_sector.strip().upper():
@@ -154,7 +163,7 @@ fig_trend.update_layout(
     xaxis_title="Timeline", yaxis_title="Index Value (Base 2024=100)",
     margin=dict(l=20, r=20, t=30, b=20), legend=dict(orientation="h", y=1.15, x=0)
 )
-st.plotly_chart(fig_trend, width='stretch')
+st.plotly_chart(fig_trend, use_container_width=True)
 
 st.markdown("---")
 
@@ -190,7 +199,7 @@ if df_forecast is not None:
         xaxis_title="Timeline (Including Future Projection)", yaxis_title="Projected Index Value",
         margin=dict(l=20, r=20, t=30, b=20), legend=dict(orientation="h", y=1.15, x=0)
     )
-    st.plotly_chart(fig_fc, width='stretch')
+    st.plotly_chart(fig_fc, use_container_width=True)
 else:
     st.info("Run pipeline to load forecast.")
 
@@ -215,7 +224,7 @@ fig_curves.update_layout(
     yaxis_title="Average Ticket Price (INR)",
     margin=dict(l=20, r=20, t=30, b=20), legend=dict(orientation="h", y=1.15, x=0)
 )
-st.plotly_chart(fig_curves, width='stretch')
+st.plotly_chart(fig_curves, use_container_width=True)
 
 st.markdown("---")
 
@@ -237,11 +246,11 @@ with col_w1:
         template="plotly_dark", margin=dict(l=10, r=10, t=10, b=10),
         legend=dict(orientation="v", y=0.5, x=1.0)
     )
-    st.plotly_chart(fig_donut, width='stretch')
+    st.plotly_chart(fig_donut, use_container_width=True)
 
 with col_w2:
     st.markdown("#### **Corridor Weight Rankings**")
     st.dataframe(
         df_weights[['sector', 'total_passengers', 'weight']].sort_values(by='weight', ascending=False),
-        width='stretch', height=350
+        use_container_width=True, height=350
     )
