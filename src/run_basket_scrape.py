@@ -1,34 +1,3 @@
-"""
-run_basket_scrape.py
----------------------
-Loops the CONFIRMED real_scraper_poc.py extraction across a route basket and
-the 5 advance-purchase windows the problem statement asks for (T+1/7/15/30/45),
-writing every result -- success or honest failure -- to a single CSV as it
-goes, so an interrupted run keeps whatever it already collected.
-
-This does NOT invent data for a route/window that fails. Every row's `status`
-column tells you exactly what happened for that attempt (see ScrapedFare's
-docstring in real_scraper_poc.py for the full list of status values).
-
-USAGE
------
-    python run_basket_scrape.py
-
-Runs against ixigo only, for the 5 routes ixigo's search widget has already
-been confirmed to accept via `from`/`to` params (DEL-BOM was verified live;
-the others use the identical mechanism so should work the same way, but
-that's a claim to verify on this run, not an assumption to trust blindly --
-check the status column).
-
-RATE LIMITING
--------------
-This makes ~25 real navigations to ixigo (5 routes x 5 windows) in one run.
-POLITE_DELAY_BETWEEN_SEARCHES below adds a pause between each. Don't lower
-this to "go faster" -- the problem statement explicitly requires rate-limited,
-ethical scraping, and hammering a single source repeatedly is also how you
-get IP-blocked, which would set you back further than the delay costs you.
-"""
-
 import asyncio
 from dataclasses import asdict
 from datetime import datetime, timedelta
