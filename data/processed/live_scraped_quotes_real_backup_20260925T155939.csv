@@ -1,0 +1,4 @@
+scrape_timestamp,source_platform,origin,destination,sector,departure_date,carrier,raw_price_text,parsed_fare_inr,status,notes
+2026-09-25 15:57:58,ixigo,DEL,BOM,DEL-BOM,2026-10-16,,"₹6,442",6442.0,ok,
+2026-09-25 15:57:58,ixigo,DEL,BOM,DEL-BOM,2026-10-16,,"₹6,530",6530.0,ok,
+2026-09-25 15:57:58,ixigo,DEL,BOM,DEL-BOM,2026-10-16,,"₹6,530",6530.0,ok,

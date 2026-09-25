@@ -11,10 +11,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
-
+ 
 import pandas as pd
 from playwright.async_api import async_playwright, TimeoutError as PWTimeout
-
+ 
 try:
     import certifi
     SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where())
@@ -22,13 +22,13 @@ except ImportError:
     # certifi not installed -- fall back to the system default context.
     # If you're seeing CERTIFICATE_VERIFY_FAILED, run: pip install certifi
     SSL_CONTEXT = ssl.create_default_context()
-
+ 
 # ---------------------------------------------------------------------------
 # Config -- the parts you'll most likely need to tweak after a first live run
 # ---------------------------------------------------------------------------
-
+ 
 SOURCE_NAME = "ixigo"
-
+ 
 # CONFIRMED against a real page dump on 2026-09-24 (results page, empty-state).
 # The `from`/`to` query params ARE honoured by ixigo's frontend -- the origin
 # and destination widgets rendered correctly from these. `date` and `class`
@@ -40,7 +40,7 @@ SEARCH_URL_TEMPLATE = (
     "https://www.ixigo.com/search/result/flight"
     "?from={origin}&to={dest}&adults=1&children=0&infants=0"
 )
-
+ 
 # CONFIRMED data-testid attributes from the real page dump -- these are far
 # more stable than the hashed CSS class names (e.g. "nsm7Bb-HzV7m-LgbsSe")
 # that ixigo's build system generates, which rotate on every deploy.
@@ -49,11 +49,11 @@ DEST_TESTID = "destinationId"
 DEPARTURE_TESTID = "departureDate"
 PAX_TESTID = "pax"
 DEPARTURE_PLACEHOLDER_TEXT = "Departure"  # what an *unset* date field shows
-
+ 
 # CONFIRMED: the genuine "zero results" empty state shows this heading.
 # Treat it as ground truth -- "no flights" is a real answer, not a failure.
 NO_RESULTS_HEADING_TEXT = "No flights found"
-
+ 
 # UNVERIFIED -- the calendar popup was not open in the dump we have, so these
 # are best-effort candidates for navigating month-by-month and clicking a day.
 # If date selection fails, the run logs status="date_picker_failed" rather
@@ -69,7 +69,7 @@ CALENDAR_MONTH_HEADER_SELECTORS = [
     "[class*='month-year']",
 ]
 SEARCH_BUTTON_NAME = "Search"
-
+ 
 # UNVERIFIED -- no flight cards have ever actually rendered in what we've seen
 # (only the empty state). Best-effort candidates; recalibrate on next run
 # that returns real results.
@@ -79,34 +79,92 @@ FLIGHT_CARD_SELECTORS = [
     "div[class*='ixi-flight']",
     "li[class*='flight']",
 ]
-
+ 
 # Candidate selectors for "the fare/price text" *within* a card element.
 PRICE_SELECTORS = [
     "[class*='price']",
     "[class*='fare']",
     "span[class*='amount']",
 ]
-
+ 
 # Candidate selectors for the carrier/airline name within a card.
 CARRIER_SELECTORS = [
     "[class*='airline']",
     "[class*='carrier']",
     "img[alt]",  # airline logos often carry the name in alt text
 ]
-
+ 
 REQUEST_TIMEOUT_MS = 20_000
 POLITE_DELAY_SECONDS = 2.0
 MAX_RETRIES = 1
 MAX_CALENDAR_MONTH_CLICKS = 12
-
+ 
 DEBUG_DIR = Path("debug_output")
 OUTPUT_CSV = Path("data/processed/live_scraped_quotes_real.csv")
-
-
+ 
+# The problem statement's own target carrier list -- used to VALIDATE a
+# candidate carrier label rather than trust any nearby image's alt text.
+# Order matters: longer/more-specific names first so "Air India Express"
+# isn't mistakenly matched as "Air India".
+KNOWN_CARRIERS = [
+    "Air India Express",
+    "Air India",
+    "IndiGo",
+    "Akasa Air",
+    "SpiceJet",
+    "Vistara",
+    "AirAsia India",
+    "Alliance Air",
+]
+ 
+MAX_CARRIER_ANCESTOR_LEVELS = 10
+ 
+ 
+def match_known_carrier(alt_text: Optional[str]) -> Optional[str]:
+    """Return the canonical carrier name if alt_text names one, else None."""
+    if not alt_text:
+        return None
+    alt_lower = alt_text.strip().lower()
+    for name in KNOWN_CARRIERS:
+        if name.lower() in alt_lower:
+            return name
+    return None
+ 
+ 
+async def find_known_carrier_near(el, max_levels: int = MAX_CARRIER_ANCESTOR_LEVELS) -> Optional[str]:
+    """
+    Walk outward from `el` through successive containing <div> ancestors
+    (nearest first -- XPath's ancestor:: axis returns reverse document
+    order, so ancestor::div[1] is the closest parent div, not the topmost),
+    and return the first img[alt] text that matches KNOWN_CARRIERS.
+ 
+    Deliberately does NOT return the first img[alt] found regardless of
+    content -- that was the earlier bug that mislabeled every row as
+    carrier="priceLock" (ixigo's price-lock badge icon, not an airline
+    logo). No whitelist match anywhere nearby -> returns None, which is
+    the honest answer, not a guess.
+    """
+    for level in range(1, max_levels + 1):
+        try:
+            ancestor = el.locator(f"xpath=ancestor::div[{level}]")
+            if await ancestor.count() == 0:
+                break
+            imgs = ancestor.locator("img[alt]")
+            img_count = await imgs.count()
+            for i in range(img_count):
+                alt_val = await imgs.nth(i).get_attribute("alt")
+                matched = match_known_carrier(alt_val)
+                if matched:
+                    return matched
+        except Exception:
+            break
+    return None
+ 
+ 
 # ---------------------------------------------------------------------------
 # Data model
 # ---------------------------------------------------------------------------
-
+ 
 @dataclass
 class ScrapedFare:
     scrape_timestamp: str
@@ -134,18 +192,18 @@ class ScrapedFare:
     #   "blocked_or_timeout" -- navigation/render never completed
     #   "blocked_by_robots_txt" -- robots.txt disallowed this URL
     notes: Optional[str] = None
-
-
+ 
+ 
 # ---------------------------------------------------------------------------
 # robots.txt compliance -- required by the problem statement
 # ---------------------------------------------------------------------------
-
+ 
 def is_scraping_allowed(target_url: str, user_agent: str = "*") -> bool:
     """
     Checks robots.txt for the target host before we touch the search page.
     Fails CLOSED: if robots.txt can't be fetched/parsed, we do not assume
     permission -- we refuse to scrape and say so.
-
+ 
     Fetches manually (instead of RobotFileParser.read(), which uses urllib's
     default SSL context) so we can hand it certifi's CA bundle -- Python venvs
     on macOS frequently lack access to the system root store and raise
@@ -155,7 +213,7 @@ def is_scraping_allowed(target_url: str, user_agent: str = "*") -> bool:
     robots_url = f"{parsed.scheme}://{parsed.netloc}/robots.txt"
     rp = urllib.robotparser.RobotFileParser()
     rp.set_url(robots_url)
-
+ 
     try:
         req = urllib.request.Request(robots_url, headers={"User-Agent": "APIx-Bot/0.1 (+research)"})
         with urllib.request.urlopen(req, timeout=10, context=SSL_CONTEXT) as resp:
@@ -171,16 +229,16 @@ def is_scraping_allowed(target_url: str, user_agent: str = "*") -> bool:
     except Exception as e:
         print(f"[robots.txt] Could not fetch {robots_url} ({e}). Refusing to scrape (fail closed).")
         return False
-
+ 
     allowed = rp.can_fetch(user_agent, target_url)
     print(f"[robots.txt] {robots_url} -> {'ALLOWED' if allowed else 'DISALLOWED'} for {target_url}")
     return allowed
-
-
+ 
+ 
 # ---------------------------------------------------------------------------
 # Extraction helpers
 # ---------------------------------------------------------------------------
-
+ 
 def parse_price_text(text: str) -> Optional[float]:
     """Turn '₹5,432' / 'INR 5432' / '5,432' into 5432.0. Returns None if no digits found."""
     if not text:
@@ -192,8 +250,8 @@ def parse_price_text(text: str) -> Optional[float]:
         return float(digits)
     except ValueError:
         return None
-
-
+ 
+ 
 async def find_first_matching(locator_root, selectors: list[str]):
     """Try each selector in order against locator_root; return (selector_used, count)."""
     for sel in selectors:
@@ -202,8 +260,8 @@ async def find_first_matching(locator_root, selectors: list[str]):
         if count > 0:
             return sel, count
     return None, 0
-
-
+ 
+ 
 async def get_testid_text(page, testid: str) -> Optional[str]:
     loc = page.locator(f"[data-testid='{testid}']")
     if await loc.count() == 0:
@@ -212,8 +270,8 @@ async def get_testid_text(page, testid: str) -> Optional[str]:
         return (await loc.first.inner_text()).strip()
     except Exception:
         return None
-
-
+ 
+ 
 async def scan_for_price_candidates(page) -> list[dict]:
     """
     Class-name-agnostic fallback: walk every text node on the rendered page
@@ -221,7 +279,7 @@ async def scan_for_price_candidates(page) -> list[dict]:
     guessing CSS selectors is fundamentally fragile against frameworks (this
     site included) that hash class names per build -- a regex over visible
     text survives a redesign that would break any class-based selector list.
-
+ 
     This does NOT construct flight records by itself (we don't yet know
     which price belongs to which card/carrier) -- it surfaces raw evidence
     so a human can look at debug_output/price_candidates_*.json once and
@@ -256,16 +314,16 @@ async def scan_for_price_candidates(page) -> list[dict]:
     except Exception as e:
         print(f"[price-scan] Failed to run DOM scan: {e}")
         return []
-
-
+ 
+ 
 async def page_shows_no_results(page) -> bool:
     """True if ixigo's own genuine 'zero flights' empty state is showing."""
     try:
         return await page.get_by_text(NO_RESULTS_HEADING_TEXT, exact=False).count() > 0
     except Exception:
         return False
-
-
+ 
+ 
 async def extract_ixigo_fares(page) -> list[dict]:
     """
     CONFIRMED against a real ixigo results page dump (2026-09-25, DEL-BOM):
@@ -275,14 +333,16 @@ async def extract_ixigo_fares(page) -> list[dict]:
     variant that's present regardless of viewport (our TreeWalker scan
     doesn't respect CSS visibility). We take only the h6 ones so each real
     flight is counted once, not twice.
-
-    Carrier name isn't confirmed the same way -- the price-candidate scan
-    didn't capture airline logos. We make a best-effort attempt to find an
-    <img alt="..."> in the nearest ancestor <div> that contains one (airline
-    logos are conventionally rendered this way), but if that comes back
-    empty, we still keep the price record with carrier=None rather than
-    guessing or dropping the fare -- the price itself is the load-bearing
-    data point for the index, not the carrier label.
+ 
+    Carrier extraction is WHITELIST-GATED, not "closest img[alt] wins".
+    An earlier version took the nearest ancestor <img alt="...">, which
+    turned out to grab ixigo's "Lock Price" badge icon (alt="priceLock")
+    instead of the airline logo -- confirmed against real output where
+    every row came back carrier="priceLock". A wrong-but-confident label
+    next to a real price is arguably worse than no label, since it looks
+    trustworthy. So now we walk outward from the nearest containing <div>
+    and only accept an alt text if it matches a known target carrier from
+    the problem statement's own airline list; otherwise carrier stays None.
     """
     price_elements = page.locator("h6[data-testid='pricing']")
     count = await price_elements.count()
@@ -293,50 +353,40 @@ async def extract_ixigo_fares(page) -> list[dict]:
             raw_price_text = (await el.inner_text()).strip()
         except Exception:
             continue
-
-        carrier_text = None
-        try:
-            ancestor = el.locator("xpath=ancestor::div[.//img[@alt]][1]")
-            if await ancestor.count() > 0:
-                img = ancestor.first.locator("img[alt]").first
-                if await img.count() > 0:
-                    alt_val = await img.get_attribute("alt")
-                    carrier_text = alt_val.strip() if alt_val else None
-        except Exception:
-            pass
-
+ 
+        carrier_text = await find_known_carrier_near(el)
         records.append({"raw_price_text": raw_price_text, "carrier": carrier_text})
     return records
-
-
+ 
+ 
 async def try_set_departure_date_via_ui(page, target_date: datetime) -> tuple[bool, str]:
     """
     Best-effort: click the Departure field and pick target_date from the
     calendar popup. UNVERIFIED against a live calendar (see module docstring)
     -- if this fails, it fails loudly with a reason string rather than
     silently leaving the date unset.
-
+ 
     Returns (success, note).
     """
     try:
         departure_field = page.locator(f"[data-testid='{DEPARTURE_TESTID}']")
         if await departure_field.count() == 0:
             return False, "departureDate field not found on page"
-
+ 
         await departure_field.first.click()
         await page.wait_for_timeout(800)  # let the calendar popup animate in
-
+ 
         target_label_variants = [
             target_date.strftime("%d %b %Y"),   # "15 Oct 2026"
             target_date.strftime("%B %Y"),       # "October 2026" (month header)
             str(target_date.day),                # bare day number, last resort
         ]
-
+ 
         month_header = None
         header_sel, header_count = await find_first_matching(page, CALENDAR_MONTH_HEADER_SELECTORS)
         if header_count > 0:
             month_header = page.locator(header_sel).first
-
+ 
         clicks = 0
         while clicks < MAX_CALENDAR_MONTH_CLICKS:
             if month_header is not None:
@@ -358,19 +408,19 @@ async def try_set_departure_date_via_ui(page, target_date: datetime) -> tuple[bo
                         return True, f"date set via day-text click -> '{new_departure_text}'"
                 except Exception:
                     pass
-
+ 
             next_sel, next_count = await find_first_matching(page, CALENDAR_NEXT_MONTH_SELECTORS)
             if next_count == 0:
                 break
             await page.locator(next_sel).first.click()
             await page.wait_for_timeout(400)
             clicks += 1
-
+ 
         # Final check regardless of loop path.
         new_departure_text = await get_testid_text(page, DEPARTURE_TESTID)
         if new_departure_text and new_departure_text != DEPARTURE_PLACEHOLDER_TEXT:
             return True, f"date set -> '{new_departure_text}'"
-
+ 
         return False, (
             "calendar interaction completed but Departure field still shows "
             "placeholder -- calendar selectors need recalibration against "
@@ -378,17 +428,17 @@ async def try_set_departure_date_via_ui(page, target_date: datetime) -> tuple[bo
         )
     except Exception as e:
         return False, f"exception during date picker interaction: {e}"
-
-
+ 
+ 
 # ---------------------------------------------------------------------------
 # Core scrape routine for ONE route / ONE date
 # ---------------------------------------------------------------------------
-
+ 
 async def scrape_one_search(origin: str, dest: str, date_str: str) -> list[ScrapedFare]:
     search_url = SEARCH_URL_TEMPLATE.format(origin=origin, dest=dest, date=date_str)
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     sector = f"{origin}-{dest}"
-
+ 
     if not is_scraping_allowed(search_url):
         return [ScrapedFare(
             scrape_timestamp=now, source_platform=SOURCE_NAME, origin=origin,
@@ -396,10 +446,10 @@ async def scrape_one_search(origin: str, dest: str, date_str: str) -> list[Scrap
             carrier=None, raw_price_text="", parsed_fare_inr=None,
             status="blocked_by_robots_txt", notes=None,
         )]
-
+ 
     DEBUG_DIR.mkdir(parents=True, exist_ok=True)
     results: list[ScrapedFare] = []
-
+ 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context(
@@ -410,26 +460,26 @@ async def scrape_one_search(origin: str, dest: str, date_str: str) -> list[Scrap
             viewport={"width": 1366, "height": 900},
         )
         page = await context.new_page()
-
+ 
         attempt = 0
         cards_locator = None
         status = "blocked_or_timeout"
         notes = None
         target_date = datetime.strptime(date_str, "%Y-%m-%d")
-
+ 
         while attempt <= MAX_RETRIES:
             attempt += 1
             try:
                 print(f"[{SOURCE_NAME}] Attempt {attempt}: navigating to {search_url}")
                 await page.goto(search_url, timeout=REQUEST_TIMEOUT_MS, wait_until="domcontentloaded")
                 await page.wait_for_timeout(3000)  # let the SPA hydrate
-
+ 
                 # Confirm the widget actually reflects our route -- catches
                 # silent param-format mismatches before we trust anything else.
                 origin_text = await get_testid_text(page, ORIGIN_TESTID)
                 dest_text = await get_testid_text(page, DEST_TESTID)
                 print(f"[{SOURCE_NAME}] Widget shows origin='{origin_text}' destination='{dest_text}'")
-
+ 
                 departure_text = await get_testid_text(page, DEPARTURE_TESTID)
                 if departure_text == DEPARTURE_PLACEHOLDER_TEXT or not departure_text:
                     print(f"[{SOURCE_NAME}] Departure date not set by URL params -- driving the date picker UI.")
@@ -439,22 +489,22 @@ async def scrape_one_search(origin: str, dest: str, date_str: str) -> list[Scrap
                     if not date_ok:
                         status = "date_picker_failed"
                         break
-
+ 
                     search_btn = page.get_by_role("button", name=SEARCH_BUTTON_NAME)
                     if await search_btn.count() > 0:
                         await search_btn.first.click()
                         await page.wait_for_timeout(4000)
                     else:
                         notes = (notes or "") + " | Search button not found via role lookup"
-
+ 
                 # Give the results grid (or the empty-state message) time to render.
                 await page.wait_for_timeout(2000)
-
+ 
                 if await page_shows_no_results(page):
                     print(f"[{SOURCE_NAME}] Site returned a genuine 'No flights found' empty state.")
                     status = "no_flights_available"
                     break
-
+ 
                 # CONFIRMED extraction path first (see extract_ixigo_fares docstring).
                 ixigo_fares = await extract_ixigo_fares(page)
                 if ixigo_fares:
@@ -471,7 +521,7 @@ async def scrape_one_search(origin: str, dest: str, date_str: str) -> list[Scrap
                         ))
                     status = "ok"
                     break
-
+ 
                 # Fallback: generic guessed selectors, kept for resilience if
                 # ixigo changes markup or this code is pointed at a new source.
                 selector_used, count = await find_first_matching(page, FLIGHT_CARD_SELECTORS)
@@ -501,7 +551,7 @@ async def scrape_one_search(origin: str, dest: str, date_str: str) -> list[Scrap
                         status = "no_cards_found_but_prices_present"
                     else:
                         status = "no_cards_found"
-
+ 
             except PWTimeout:
                 print(f"[{SOURCE_NAME}] Timeout on attempt {attempt}.")
                 status = "blocked_or_timeout"
@@ -509,9 +559,9 @@ async def scrape_one_search(origin: str, dest: str, date_str: str) -> list[Scrap
                 print(f"[{SOURCE_NAME}] Unexpected error on attempt {attempt}: {e}")
                 status = "blocked_or_timeout"
                 notes = str(e)
-
+ 
             await asyncio.sleep(POLITE_DELAY_SECONDS)
-
+ 
         # Always save debug artifacts, success or failure -- this is how you
         # calibrate selectors without guessing.
         stamp = datetime.now().strftime("%Y%m%dT%H%M%S")
@@ -524,7 +574,7 @@ async def scrape_one_search(origin: str, dest: str, date_str: str) -> list[Scrap
             print(f"[debug] Saved {html_path.name} and {png_path.name}")
         except Exception as e:
             print(f"[debug] Could not save debug artifacts: {e}")
-
+ 
         if status != "ok" or (cards_locator is None and not results):
             await browser.close()
             return [ScrapedFare(
@@ -533,7 +583,7 @@ async def scrape_one_search(origin: str, dest: str, date_str: str) -> list[Scrap
                 carrier=None, raw_price_text="", parsed_fare_inr=None,
                 status=status, notes=notes,
             )]
-
+ 
         # If the confirmed extract_ixigo_fares() path already populated
         # `results` above, there's nothing left to do -- skip the generic
         # fallback extraction entirely.
@@ -543,19 +593,19 @@ async def scrape_one_search(origin: str, dest: str, date_str: str) -> list[Scrap
             card_count = min(card_count, 40)  # sane cap for a POC run
             for i in range(card_count):
                 card = cards_locator.nth(i)
-
+ 
                 price_sel, price_count = await find_first_matching(card, PRICE_SELECTORS)
                 raw_price_text = ""
                 if price_count > 0:
                     raw_price_text = (await card.locator(price_sel).first.inner_text()).strip()
-
+ 
                 carrier_sel, carrier_count = await find_first_matching(card, CARRIER_SELECTORS)
                 carrier_text = None
                 if carrier_count > 0:
                     el = card.locator(carrier_sel).first
                     carrier_text = (await el.get_attribute("alt")) or (await el.inner_text())
                     carrier_text = carrier_text.strip() if carrier_text else None
-
+ 
                 parsed_fare = parse_price_text(raw_price_text)
                 results.append(ScrapedFare(
                     scrape_timestamp=now, source_platform=SOURCE_NAME, origin=origin,
@@ -565,30 +615,30 @@ async def scrape_one_search(origin: str, dest: str, date_str: str) -> list[Scrap
                     status="ok" if parsed_fare is not None else "parse_failed",
                     notes=notes,
                 ))
-
+ 
         await browser.close()
-
+ 
     return results
-
-
+ 
+ 
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
-
+ 
 async def main(origin: str, dest: str, date_str: str):
     records = await scrape_one_search(origin, dest, date_str)
-
+ 
     OUTPUT_CSV.parent.mkdir(parents=True, exist_ok=True)
     df = pd.DataFrame([asdict(r) for r in records])
     df.to_csv(OUTPUT_CSV, index=False)
-
+ 
     ok_count = (df["status"] == "ok").sum() if not df.empty else 0
     no_flights_count = (df["status"] == "no_flights_available").sum() if not df.empty else 0
     print("\n--- Run summary ---")
     print(f"Total records: {len(df)}")
     print(f"Successfully parsed fares: {ok_count}")
     print(f"Saved to: {OUTPUT_CSV}")
-
+ 
     if no_flights_count > 0 and ok_count == 0:
         print(
             "\nSite returned a genuine 'No flights found' result for this "
@@ -604,8 +654,8 @@ async def main(origin: str, dest: str, date_str: str):
             "*.html to see what the page actually rendered, and update the "
             "relevant selector list at the top of this file to match."
         )
-
-
+ 
+ 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--origin", default="DEL")
@@ -615,14 +665,15 @@ if __name__ == "__main__":
         help="YYYY-MM-DD. Defaults to 21 days from today.",
     )
     args = parser.parse_args()
-
+ 
     if args.date:
         date_str = args.date
     else:
         from datetime import timedelta
         date_str = (datetime.now() + timedelta(days=21)).strftime("%Y-%m-%d")
-
+ 
     try:
         asyncio.run(main(args.origin, args.dest, date_str))
     except KeyboardInterrupt:
         sys.exit(1)
+ 
